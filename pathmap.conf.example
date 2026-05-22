@@ -1,0 +1,9 @@
+﻿# pathmap.conf — Cross-platform path mappings
+# Format: name = WindowsPath | macOSPath
+# Windows paths use double backslash (\\) for escaping in config files.
+#
+# Copy this to ~/.codex/pathmap.conf and edit for your projects.
+
+# Example entries (uncomment and edit):
+# my_project = C:\\Users\\NAME\\Projects\\my_project | /Users/NAME/Projects/my_project
+# working  = D:\\working | /Users/NAME/working
