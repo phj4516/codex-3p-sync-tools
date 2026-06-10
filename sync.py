@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """codex-sync ? Cross-platform Codex conversation sync via GitHub.
 
 Usage:
@@ -24,14 +24,14 @@ try:
 except ImportError:
     HAS_PATHSPEC = False
 
-SYNC_REPO = "your_github_url"
+SYNC_REPO = "https://github.com/GrLime909/codex-sync.git"
 IS_WINDOWS = platform.system() == "Windows"
 
 def codex_home():   return Path.home() / ".codex"
 def script_dir():   return Path(__file__).resolve().parent
 def sync_dir():     return Path.home() / "CodexSync"
 
-KEEP_SESSIONS = 20  # max sessions to sync
+KEEP_SESSIONS = 300  # max sessions to sync
 
 
 # ?? git helpers ???????????????????????????????????????????????????
@@ -53,11 +53,11 @@ def ensure_repo():
         subprocess.run(["git", "remote", "add", "origin", SYNC_REPO], cwd=str(repo), capture_output=True)
         r2 = subprocess.run(["git", "pull", "origin", "main", "--allow-unrelated-histories"],
                             cwd=str(repo), capture_output=True, text=True)
+        run_git(["branch", "-M", "main"], repo)
         if r2.returncode != 0:
             (repo / ".gitkeep").write_text("")
             run_git(["add", ".gitkeep"], repo)
             run_git(["commit", "-m", "init codex-sync"], repo)
-            run_git(["branch", "-M", "main"], repo)
             r3 = run_git(["push", "-u", "origin", "main"], repo)
             if r3.returncode != 0:
                 stderr = r3.stderr.strip()
@@ -73,7 +73,7 @@ def ensure_repo():
     return repo
 
 def git_pull(repo):
-    r = run_git(["pull", "--rebase"], repo)
+    r = run_git(["pull", "--rebase", "origin", "main"], repo)
     if r.returncode != 0:
         print(f"git pull failed: {r.stderr.strip()}")
         return False
@@ -86,19 +86,10 @@ def git_push(repo, message):
         return True
     run_git(["add", "-A"], repo)
     run_git(["commit", "-m", message], repo)
-    r = run_git(["push"], repo)
+    r = run_git(["push", "origin", "main"], repo)
     if r.returncode != 0:
-        stderr = r.stderr.strip()
-        if "no upstream branch" in stderr or "--set-upstream" in stderr:
-            branch = subprocess.run(["git", "branch", "--show-current"],
-                                    cwd=str(repo), capture_output=True, text=True).stdout.strip()
-            r = run_git(["push", "--set-upstream", "origin", branch], repo)
-            if r.returncode != 0:
-                print(f"git push failed: {r.stderr.strip()}")
-                return False
-        else:
-            print(f"git push failed: {stderr}")
-            return False
+        print(f"git push failed: {r.stderr.strip()}")
+        return False
     print("Pushed to GitHub.")
     return True
 
@@ -127,6 +118,10 @@ def build_replacements(mappings, direction):
             pairs.append((win_path.replace("\\", "\\\\"), mac_path))
         else:
             pairs.append((mac_path, win_path.replace("\\", "\\\\")))
+    # Sort by search-string length descending: longer paths first to
+    # avoid prefix-shorter partial matching longer paths.
+    pairs.sort(key=lambda p: len(p[0]), reverse=True)
+
     return pairs
 
 def convert_file(filepath, replacements):
@@ -159,7 +154,7 @@ def copy_other_files(src_root, dst_root, gitignore_spec, base_rel=""):
     """Copy files from src_root to dst_root, respecting gitignore patterns."""
     import filecmp
     for item in src_root.iterdir():
-        if item.name in (".git", "sessions"):
+        if item.name in (".git", "sessions", "archived_sessions"):
             continue
         rel = f"{base_rel}/{item.name}" if base_rel else item.name
         rel = rel.replace("\\", "/")
@@ -171,7 +166,7 @@ def copy_other_files(src_root, dst_root, gitignore_spec, base_rel=""):
         try:
             if item.is_dir():
                 dst.mkdir(parents=True, exist_ok=True)
-                copy_other_files(item, dst, gitignore_spec, rel)
+                copy_other_files(item, dst, gitignore_spec, rel.rstrip('/'))
             else:
                 if dst.exists():
                     try:
@@ -187,7 +182,7 @@ def cleanup_stale_files(src_root, dst_root, gitignore_spec, base_rel=""):
     """Delete files from dst_root that no longer exist in src_root."""
     import shutil
     for item in list(dst_root.iterdir()):
-        if item.name in (".git", "sessions"):
+        if item.name in (".git", "sessions", "archived_sessions"):
             continue
         rel = f"{base_rel}/{item.name}" if base_rel else item.name
         rel = rel.replace("\\", "/")
@@ -204,7 +199,7 @@ def cleanup_stale_files(src_root, dst_root, gitignore_spec, base_rel=""):
                 item.unlink(missing_ok=True)
                 print(f"  Removed stale file: {rel}")
         elif item.is_dir() and src_item.is_dir():
-            cleanup_stale_files(src_item, item, gitignore_spec, rel)
+            cleanup_stale_files(src_item, item, gitignore_spec, rel.rstrip("/"))
 
 def list_session_files(root):
     if not root.is_dir():
@@ -217,83 +212,61 @@ def session_mtime(f):
     except Exception:
         return 0
 
-def sync_push(mappings, keep_sessions):
-    source = codex_home() / "sessions"
-    repo = ensure_repo()
-    git_pull(repo)
 
-    if IS_WINDOWS:
-        direction, target_os = "to-mac", "macOS"
-    else:
-        direction, target_os = "to-win", "Windows"
+def _push_sessions_dir(source_rel, keep_sessions, mappings, direction):
+    """Push JSONL files from a directory with path conversion."""
+    source = codex_home() / source_rel
+    dest_root = sync_dir() / source_rel
 
-    replacements = build_replacements(mappings, direction)
-    dest_root = repo / "sessions"
-
-    # Get local sessions, keep only the N most recent
     all_files = list_session_files(source)
     all_files.sort(key=session_mtime, reverse=True)
-    recent = all_files[:keep_sessions]
-    skipped = len(all_files) - len(recent)
-    if skipped:
-        print(f"Keeping {len(recent)} most recent session(s), skipping {skipped} older")
+    if keep_sessions:
+        recent = all_files[:keep_sessions]
+    else:
+        recent = all_files
 
-    if not recent:
-        print("No session files to push")
-        return
-
-    # Clear old sessions from git tracking (preserve local files)
+    # Clean up remote files that were deleted locally
     remote_files = list_session_files(dest_root)
     for rf in remote_files:
         rel = rf.relative_to(dest_root)
         local = source / rel
-        if local not in recent:
+        if not local.exists():
             rf.unlink(missing_ok=True)
 
-    # Copy and convert recent sessions
+    if not recent:
+        return 0, 0
+
+    # Copy and convert
+    replacements = build_replacements(mappings, direction)
     dest_root.mkdir(parents=True, exist_ok=True)
+    copied, converted = 0, 0
     for src in recent:
         rel = src.relative_to(source)
         dst = dest_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+        copied += 1
         if replacements:
-            convert_file(dst, replacements)
+            if convert_file(dst, replacements):
+                converted += 1
 
-    print(f"Pushed {len(recent)} session(s) -> {dest_root}")
-    print(f"Paths converted for {target_os} ({len(replacements)} mapping(s))")
-    gi = load_gitignore_rules()
-    if gi:
-        copy_other_files(codex_home(), repo, gi)
-        cleanup_stale_files(codex_home(), repo, gi)
-        gi_src = codex_home() / ".gitignore"
-        gi_dst = repo / ".gitignore"
-        shutil.copy2(gi_src, gi_dst)
-    git_push(repo, f"push from {platform.system()}: {len(recent)} sessions")
+    return copied, converted
 
-def sync_pull(mappings):
-    repo = ensure_repo()
-    git_pull(repo)
 
-    source = repo / "sessions"
+def _pull_sessions_dir(source_rel, mappings, direction):
+    """Pull JSONL files from a directory with path conversion and cleanup."""
+    source = sync_dir() / source_rel
     if not source.is_dir():
-        print("No sessions/ in repo ? nothing to pull")
-        return
+        return 0, 0, 0
 
-    if IS_WINDOWS:
-        direction = "to-win"
-    else:
-        direction = "to-mac"
-
-    replacements = build_replacements(mappings, direction)
-    dest_root = codex_home() / "sessions"
+    dest_root = codex_home() / source_rel
     dest_root.mkdir(parents=True, exist_ok=True)
 
     files = list_session_files(source)
     if not files:
-        print("No session files in repo")
-        return
+        return 0, 0, 0
 
+    replacements = build_replacements(mappings, direction)
     copied, converted = 0, 0
     for src in files:
         rel = src.relative_to(source)
@@ -304,12 +277,89 @@ def sync_pull(mappings):
         if replacements:
             if convert_file(dst, replacements):
                 converted += 1
+
+    # Clean up local files that were deleted from remote
+    remote_relpaths = {f.relative_to(source) for f in files}
+    local_files = list_session_files(dest_root)
+    cleaned = 0
+    for lf in local_files:
+        if lf.relative_to(dest_root) not in remote_relpaths:
+            lf.unlink(missing_ok=True)
+            cleaned += 1
+            print(f"  Removed stale {source_rel}: {lf.name}")
+
+    return copied, converted, cleaned
+
+def sync_push(mappings, keep_sessions):
+    repo = ensure_repo()
+    git_pull(repo)
+
+    if IS_WINDOWS:
+        direction, target_os = "to-mac", "macOS"
+    else:
+        direction, target_os = "to-win", "Windows"
+
+    total_copied, total_converted = 0, 0
+
+    # Sessions (with keep limit)
+    all_files = list_session_files(codex_home() / "sessions")
+    all_files.sort(key=session_mtime, reverse=True)
+    skipped = max(0, len(all_files) - keep_sessions)
+    if skipped:
+        print(f"Sessions: keeping {keep_sessions} most recent, skipping {skipped} older")
+
+    c, v = _push_sessions_dir("sessions", keep_sessions, mappings, direction)
+    total_copied += c
+    total_converted += v
+
+    # Archived sessions (no keep limit — all pushed)
+    c, v = _push_sessions_dir("archived_sessions", None, mappings, direction)
+    total_copied += c
+    total_converted += v
+
+    print(f"Paths converted for {target_os} ({len(build_replacements(mappings, direction))} mapping(s))")
+    gi = load_gitignore_rules()
+    if gi:
+        copy_other_files(codex_home(), repo, gi)
+        cleanup_stale_files(codex_home(), repo, gi)
+        gi_src = codex_home() / ".gitignore"
+        gi_dst = repo / ".gitignore"
+        shutil.copy2(gi_src, gi_dst)
+    git_push(repo, f"push from {platform.system()}: {total_copied} files")
+
+def sync_pull(mappings):
+    repo = ensure_repo()
+    git_pull(repo)
+
+    if IS_WINDOWS:
+        direction = "to-win"
+    else:
+        direction = "to-mac"
+
+    total_copied, total_converted, total_cleaned = 0, 0, 0
+
+    c, v, cl = _pull_sessions_dir("sessions", mappings, direction)
+    total_copied += c
+    total_converted += v
+    total_cleaned += cl
+
+    c, v, cl = _pull_sessions_dir("archived_sessions", mappings, direction)
+    total_copied += c
+    total_converted += v
+    total_cleaned += cl
+
+    if total_copied == 0:
+        print("No files to pull")
+        return
+
     gi = load_gitignore_rules()
     if gi:
         copy_other_files(repo, codex_home(), gi)
         cleanup_stale_files(repo, codex_home(), gi)
-    print(f"Pulled {copied} session(s) -> {dest_root}")
-    print(f"Paths converted in {converted} file(s) ({len(replacements)} mapping(s))")
+    print(f"Pulled {total_copied} file(s)")
+    if total_cleaned:
+        print(f"Cleaned up {total_cleaned} stale local file(s)")
+    print(f"Paths converted in {total_converted} file(s)")
 
 def sync_status(mappings):
     local_files = list_session_files(codex_home() / "sessions")
@@ -326,10 +376,15 @@ def sync_status(mappings):
         last_commit = "(not cloned yet)"
         remote_files = []
 
+    archived_local = list_session_files(codex_home() / "archived_sessions")
+    archived_remote = list_session_files(repo / "archived_sessions") if (repo / ".git").is_dir() else []
+
     print(f"Local sessions   : {len(local_files)} file(s) (keep {KEEP_SESSIONS})")
     if local_files:
         print(f"  Newest: {local_files[0].name}")
-    print(f"GitHub (remote)  : {len(remote_files)} file(s)")
+    print(f"Local archived   : {len(archived_local)} file(s)")
+    print(f"GitHub sessions  : {len(remote_files)} file(s)")
+    print(f"GitHub archived  : {len(archived_remote)} file(s)")
     print(f"Last commit      : {last_commit}")
     print(f"Path mappings    : {len(mappings)}")
     for name, (w, m) in mappings.items():
