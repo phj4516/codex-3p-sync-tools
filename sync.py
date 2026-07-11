@@ -39,6 +39,26 @@ KEEP_SESSIONS = 300  # max sessions to sync
 def run_git(args, cwd):
     return subprocess.run(["git"] + args, cwd=str(cwd), capture_output=True, text=True)
 
+def current_branch(repo):
+    r = run_git(["branch", "--show-current"], repo)
+    branch = r.stdout.strip()
+    if branch:
+        return branch
+    r = run_git(["symbolic-ref", "--short", "HEAD"], repo)
+    branch = r.stdout.strip()
+    return branch or "main"
+
+def remote_branch_exists(repo, branch):
+    r = run_git(["ls-remote", "--exit-code", "--heads", "origin", branch], repo)
+    if r.returncode == 0:
+        return True
+    if r.returncode == 2:
+        return False
+    stderr = r.stderr.strip()
+    if stderr:
+        print(f"git remote branch check failed: {stderr}")
+    return None
+
 def ensure_repo():
     repo = sync_dir()
     if not (repo / ".git").is_dir():
@@ -51,14 +71,18 @@ def ensure_repo():
         print(f"Clone failed ({err}), initializing locally...")
         subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
         subprocess.run(["git", "remote", "add", "origin", SYNC_REPO], cwd=str(repo), capture_output=True)
-        r2 = subprocess.run(["git", "pull", "origin", "main", "--allow-unrelated-histories"],
-                            cwd=str(repo), capture_output=True, text=True)
-        run_git(["branch", "-M", "main"], repo)
-        if r2.returncode != 0:
+        branch = current_branch(repo)
+        remote_exists = remote_branch_exists(repo, branch)
+        if remote_exists:
+            r2 = run_git(["pull", "origin", branch, "--allow-unrelated-histories"], repo)
+            pulled = r2.returncode == 0
+        else:
+            pulled = False
+        if not pulled:
             (repo / ".gitkeep").write_text("")
             run_git(["add", ".gitkeep"], repo)
             run_git(["commit", "-m", "init codex-sync"], repo)
-            r3 = run_git(["push", "-u", "origin", "main"], repo)
+            r3 = run_git(["push", "-u", "origin", branch], repo)
             if r3.returncode != 0:
                 stderr = r3.stderr.strip()
                 if "Permission denied" in stderr or "publickey" in stderr:
@@ -73,7 +97,14 @@ def ensure_repo():
     return repo
 
 def git_pull(repo):
-    r = run_git(["pull", "--rebase", "origin", "main"], repo)
+    branch = current_branch(repo)
+    remote_exists = remote_branch_exists(repo, branch)
+    if remote_exists is False:
+        print(f"Remote branch origin/{branch} not found; skipping pull.")
+        return True
+    if remote_exists is None:
+        return False
+    r = run_git(["pull", "--rebase", "origin", branch], repo)
     if r.returncode != 0:
         print(f"git pull failed: {r.stderr.strip()}")
         return False
@@ -84,9 +115,10 @@ def git_push(repo, message):
     if not r.stdout.strip():
         print("No changes to push.")
         return True
+    branch = current_branch(repo)
     run_git(["add", "-A"], repo)
     run_git(["commit", "-m", message], repo)
-    r = run_git(["push", "origin", "main"], repo)
+    r = run_git(["push", "-u", "origin", branch], repo)
     if r.returncode != 0:
         print(f"git push failed: {r.stderr.strip()}")
         return False
