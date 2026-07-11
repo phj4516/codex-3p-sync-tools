@@ -24,7 +24,7 @@ try:
 except ImportError:
     HAS_PATHSPEC = False
 
-SYNC_REPO = "https://github.com/phj4516/codex-sync.git"
+SYNC_REPO = "git@gitee.com:phj1993/codex-sync.git"
 IS_WINDOWS = platform.system() == "Windows"
 
 def codex_home():   return Path.home() / ".codex"
