@@ -1,4 +1,59 @@
-﻿__pycache__/
+# ============================================
+# Codex Sync: .gitignore for ~/.codex
+# ============================================
+
+# === Sensitive ===
+.credentials.json
+*.key
+*.pem
+.env
+.bak
+
+# === Local cache & temp ===
+.sandbox/
+.sandbox-bin/
+.sandbox-secrets/
+.tmp/
+sqlite/
+tmp/
+/cache/
+vendor_imports/
+__pycache__/
 *.pyc
+computer-use/
+computer-use-turn-ended/
+
+
+# === Large files ===
+logs_*.sqlite*
+.sqlite*
+state_*.sqlite*
+*.sqlite-wal
+goals_1.sqlite
+.sqlite
+.vbs
+.log
+*.sqlite-shm
+*.bak
+.db
+
+# === Device-specific state ===
+.codex-global-state.json*
+cap_sid
+models_cache.json
+sandbox.log
+computer-use-turn-ended/
+codex-sync/
+
+# === OS ===
 .DS_Store
 Thumbs.db
+
+# === Session files (trimmed by sync.py via KEEP_SESSIONS)
+!sessions/  # keep the directory structure
+
+config.toml
+auth.json
+codex-dev.db
+installation_id
+.personality_migration
